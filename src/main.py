@@ -24,47 +24,134 @@ HEADERS = {
 }
 
 
-def fetch_page(url: str, cache_file: Path) -> str:
-    """Fetch a page or read it from the local cache."""
+# ==========================================
+# Run statistics
+# ==========================================
+
+stats = {
+    "pages_fetched": 0,
+    "cache_hits": 0
+}
+
+
+def fetch_page(
+    url: str,
+    cache_file: Path
+) -> str:
 
     if cache_file.exists():
-        print(f"CACHE HIT: {url}")
+
+        print(
+            f"CACHE HIT: {url}"
+        )
+
+        stats["cache_hits"] += 1
 
         return cache_file.read_text(
             encoding="utf-8"
         )
 
-    print(f"FETCH: {url}")
-
-    response = requests.get(
-        url,
-        headers=HEADERS,
-        timeout=10
+    print(
+        f"FETCH: {url}"
     )
 
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"Fetch failed: HTTP {response.status_code}"
-        )
+    max_attempts = 2
 
-    response.encoding = "utf-8"
+    for attempt in range(
+        1,
+        max_attempts + 1
+    ):
 
-    html = response.text
+        try:
 
-    # Polite delay after a real request
-    time.sleep(0.5)
+            response = requests.get(
+                url,
+                headers=HEADERS,
+                timeout=10
+            )
 
-    cache_file.parent.mkdir(
-        parents=True,
-        exist_ok=True
-    )
+            status = response.status_code
 
-    cache_file.write_text(
-        html,
-        encoding="utf-8"
-    )
+            print(
+                f"status={status} "
+                f"attempt={attempt}"
+            )
 
-    return html
+            if status == 200:
+
+                response.encoding = "utf-8"
+
+                html = response.text
+
+                stats["pages_fetched"] += 1
+
+                time.sleep(0.5)
+
+                cache_file.parent.mkdir(
+                    parents=True,
+                    exist_ok=True
+                )
+
+                cache_file.write_text(
+                    html,
+                    encoding="utf-8"
+                )
+
+                return html
+
+            if status in (403, 404):
+
+                raise RuntimeError(
+                    f"Fetch failed: HTTP {status}"
+                )
+
+            if 500 <= status <= 599:
+
+                if attempt < max_attempts:
+
+                    print(
+                        "Server error. "
+                        "Retrying..."
+                    )
+
+                    time.sleep(1)
+
+                    continue
+
+                raise RuntimeError(
+                    f"Fetch failed after retry: "
+                    f"HTTP {status}"
+                )
+
+            raise RuntimeError(
+                f"Fetch failed: HTTP {status}"
+            )
+
+        except requests.Timeout:
+
+            print(
+                f"TIMEOUT attempt={attempt}"
+            )
+
+            if attempt < max_attempts:
+
+                print(
+                    "Retrying after timeout..."
+                )
+
+                time.sleep(1)
+
+                continue
+
+            raise RuntimeError(
+                "Fetch failed after timeout retry"
+            )
+
+        except requests.RequestException as error:
+
+            raise RuntimeError(
+                f"Request failed: {error}"
+            )
 
 
 def extract_book_urls(
@@ -136,14 +223,17 @@ def get_next_page(
 
 
 def discover_books():
-    """Discover books from the first three catalogue pages."""
 
     current_url = BASE_URL
 
     discovered_books = []
+
     catalogue_pages = 0
 
-    while current_url and catalogue_pages < 3:
+    while (
+        current_url
+        and catalogue_pages < 3
+    ):
 
         catalogue_pages += 1
 
@@ -181,7 +271,7 @@ def discover_books():
             current_url
         )
 
-    # Remove duplicate URLs
+    # Remove duplicates
     unique_books = {}
 
     for book in discovered_books:
@@ -211,19 +301,15 @@ def extract_book_record(
         "html.parser"
     )
 
-    # Product area
     product = soup.select_one(
         "div.product_main"
     )
 
     if product is None:
+
         raise ValueError(
             "Product area not found"
         )
-
-    # -------------------------
-    # Title
-    # -------------------------
 
     title_element = product.select_one(
         "h1"
@@ -237,10 +323,6 @@ def extract_book_record(
         else None
     )
 
-    # -------------------------
-    # Price
-    # -------------------------
-
     price_element = product.select_one(
         "p.price_color"
     )
@@ -252,10 +334,6 @@ def extract_book_record(
         if price_element
         else None
     )
-
-    # -------------------------
-    # Availability
-    # -------------------------
 
     availability_element = product.select_one(
         "p.instock.availability"
@@ -269,10 +347,6 @@ def extract_book_record(
         if availability_element
         else None
     )
-
-    # -------------------------
-    # Rating
-    # -------------------------
 
     rating_element = product.select_one(
         "p.star-rating"
@@ -288,11 +362,8 @@ def extract_book_record(
         )
 
         if len(classes) > 1:
-            rating_text = classes[-1]
 
-    # -------------------------
-    # Description
-    # -------------------------
+            rating_text = classes[-1]
 
     description = None
 
@@ -317,10 +388,6 @@ def extract_book_record(
                 )
             )
 
-    # -------------------------
-    # Provenance
-    # -------------------------
-
     fetched_at = datetime.now(
         timezone.utc
     ).isoformat()
@@ -339,9 +406,14 @@ def extract_book_record(
 
 def main():
 
+    run_started_at = datetime.now(
+        timezone.utc
+    )
+
+    run_start_time = time.perf_counter()
+
     # ==========================================
-    # Stage 2
-    # Discover the 60 books
+    # Discover
     # ==========================================
 
     books = discover_books()
@@ -356,11 +428,33 @@ def main():
     )
 
     # ==========================================
-    # Stage 3
-    # Extract all book records
+    # Failure test
+    # ==========================================
+
+    books.append(
+        {
+            "product_url": (
+                "https://books.toscrape.com/"
+                "catalogue/this-book-does-not-exist_999999/"
+                "index.html"
+            ),
+            "source_page": BASE_URL
+        }
+    )
+
+    print()
+    print(
+        "Added one deliberately broken URL "
+        "for failure testing."
+    )
+
+    # ==========================================
+    # Extract
     # ==========================================
 
     records = []
+
+    failed_pages = []
 
     for index, book in enumerate(
         books,
@@ -377,7 +471,8 @@ def main():
 
         print()
         print(
-            f"[{index}/{len(books)}] Processing book"
+            f"[{index}/{len(books)}] "
+            f"Processing book"
         )
 
         detail_cache = (
@@ -412,6 +507,13 @@ def main():
                 f"REASON: {error}"
             )
 
+            failed_pages.append(
+                {
+                    "url": product_url,
+                    "reason": str(error)
+                }
+            )
+
     # ==========================================
     # Stage 3 summary
     # ==========================================
@@ -427,10 +529,13 @@ def main():
         f"raw_records={len(records)}"
     )
 
+    print(
+        f"failed_pages={len(failed_pages)}"
+    )
+
     print("=" * 50)
 
     # ==========================================
-    # Stage 4
     # Normalize + Validate
     # ==========================================
 
@@ -442,17 +547,14 @@ def main():
 
         try:
 
-            # Normalize raw data
             normalized_record = normalize_record(
                 record
             )
 
-            # Validate using Pydantic
             validated_book = Book(
                 **normalized_record
             )
 
-            # Convert Pydantic model to dictionary
             valid_records.append(
                 validated_book.model_dump(
                     mode="json"
@@ -469,12 +571,14 @@ def main():
             )
 
     # ==========================================
-    # Stage 4 validation summary
+    # Validation summary
     # ==========================================
 
     print()
     print("=" * 50)
+
     print("STAGE 4 VALIDATION")
+
     print("=" * 50)
 
     print(
@@ -502,7 +606,6 @@ def main():
         OUTPUT_DIR / "errors.json"
     )
 
-    # Save valid records
     with books_file.open(
         "w",
         encoding="utf-8"
@@ -515,7 +618,6 @@ def main():
             indent=2
         )
 
-    # Save invalid records
     with errors_file.open(
         "w",
         encoding="utf-8"
@@ -529,13 +631,74 @@ def main():
         )
 
     # ==========================================
-    # Output summary
+    # Run report
+    # ==========================================
+
+    duration = (
+        time.perf_counter()
+        - run_start_time
+    )
+
+    run_report = {
+        "started_at": run_started_at.isoformat(),
+        "duration_seconds": round(
+            duration,
+            2
+        ),
+        "catalogue_pages": 3,
+        "discovered_urls": len(books) - 1,
+        "pages_fetched": stats[
+            "pages_fetched"
+        ],
+        "cache_hits": stats[
+            "cache_hits"
+        ],
+        "valid_records": len(
+            valid_records
+        ),
+        "invalid_records": len(
+            invalid_records
+        ),
+        "failed_pages": len(
+            failed_pages
+        )
+    }
+
+    report_file = (
+        OUTPUT_DIR
+        / "run-report.json"
+    )
+
+    with report_file.open(
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        json.dump(
+            run_report,
+            file,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    # ==========================================
+    # Final summary
     # ==========================================
 
     print()
-    print("OUTPUT")
-    print("-" * 50)
+    print("=" * 50)
 
+    print("RUN REPORT")
+
+    print("=" * 50)
+
+    for key, value in run_report.items():
+
+        print(
+            f"{key}: {value}"
+        )
+
+    print()
     print(
         f"books.json: {len(valid_records)} records"
     )
@@ -544,24 +707,9 @@ def main():
         f"errors.json: {len(invalid_records)} records"
     )
 
-    # ==========================================
-    # Show one validated record
-    # ==========================================
-
-    if valid_records:
-
-        print()
-        print(
-            "NORMALIZED + VALIDATED RECORD"
-        )
-
-        print("-" * 50)
-
-        for key, value in valid_records[0].items():
-
-            print(
-                f"{key}: {value}"
-            )
+    print(
+        f"run-report.json: created"
+    )
 
 
 if __name__ == "__main__":
