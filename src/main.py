@@ -1,8 +1,10 @@
 import requests
+import time
 from pathlib import Path
 from urllib.parse import urljoin
+from datetime import datetime, timezone
+
 from bs4 import BeautifulSoup
-import time
 
 
 BASE_URL = "https://books.toscrape.com/"
@@ -40,6 +42,11 @@ def fetch_page(url: str, cache_file: Path) -> str:
             f"Fetch failed: HTTP {response.status_code}"
         )
 
+    response.encoding = "utf-8"
+
+    html = response.text
+
+    # Polite delay after a real request
     time.sleep(0.5)
 
     cache_file.parent.mkdir(
@@ -48,18 +55,17 @@ def fetch_page(url: str, cache_file: Path) -> str:
     )
 
     cache_file.write_text(
-        response.text,
+        html,
         encoding="utf-8"
     )
 
-    return response.text
+    return html
 
 
 def extract_book_urls(
     html: str,
     page_url: str
 ) -> list[str]:
-    """Extract all book URLs from one catalogue page."""
 
     soup = BeautifulSoup(
         html,
@@ -73,12 +79,17 @@ def extract_book_urls(
     )
 
     for book in books:
-        link = book.select_one("h3 a")
+
+        link = book.select_one(
+            "h3 a"
+        )
 
         if link:
+
             href = link.get("href")
 
             if href:
+
                 absolute_url = urljoin(
                     page_url,
                     href
@@ -95,7 +106,6 @@ def get_next_page(
     html: str,
     page_url: str
 ) -> str | None:
-    """Find the catalogue's next page."""
 
     soup = BeautifulSoup(
         html,
@@ -120,32 +130,28 @@ def get_next_page(
     )
 
 
-def main():
+def discover_books():
+    """Discover books from the first three catalogue pages."""
+
     current_url = BASE_URL
 
-    all_book_urls = []
+    discovered_books = []
     catalogue_pages = 0
 
-    while current_url:
+    while current_url and catalogue_pages < 3:
+
         catalogue_pages += 1
 
-        # Cache file for this catalogue page
-        if current_url == BASE_URL:
-            cache_file = CACHE_DIR / "catalogue-page-1.html"
-        else:
-            page_number = catalogue_pages
-            cache_file = (
-                CACHE_DIR
-                / f"catalogue-page-{page_number}.html"
-            )
+        cache_file = (
+            CACHE_DIR
+            / f"catalogue-page-{catalogue_pages}.html"
+        )
 
-        # Fetch page
         html = fetch_page(
             current_url,
             cache_file
         )
 
-        # Extract books
         book_urls = extract_book_urls(
             html,
             current_url
@@ -156,39 +162,262 @@ def main():
             f"books={len(book_urls)}"
         )
 
-        all_book_urls.extend(
-            book_urls
-        )
+        for url in book_urls:
 
-        # Stop after the first 3 catalogue pages
-        if catalogue_pages == 3:
-            break
+            discovered_books.append(
+                {
+                    "product_url": url,
+                    "source_page": current_url
+                }
+            )
 
-        # Follow the site's own next link
         current_url = get_next_page(
             html,
             current_url
         )
 
-        # Safety check
-        if current_url is None:
-            break
-
     # Remove duplicate URLs
-    unique_book_urls = list(
-        dict.fromkeys(all_book_urls)
+    unique_books = {}
+
+    for book in discovered_books:
+
+        unique_books[
+            book["product_url"]
+        ] = book["source_page"]
+
+    return [
+        {
+            "product_url": url,
+            "source_page": source_page
+        }
+        for url, source_page
+        in unique_books.items()
+    ]
+
+
+def extract_book_record(
+    html: str,
+    product_url: str,
+    source_page: str
+) -> dict:
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
     )
+
+    # Product area
+    product = soup.select_one(
+        "div.product_main"
+    )
+
+    if product is None:
+        raise ValueError(
+            "Product area not found"
+        )
+
+    # Title
+    title_element = product.select_one(
+        "h1"
+    )
+
+    title = (
+        title_element.get_text(
+            strip=True
+        )
+        if title_element
+        else None
+    )
+
+    # Price
+    price_element = product.select_one(
+        "p.price_color"
+    )
+
+    price_text = (
+        price_element.get_text(
+            strip=True
+        )
+        if price_element
+        else None
+    )
+
+    # Availability
+    availability_element = product.select_one(
+        "p.instock.availability"
+    )
+
+    availability_text = (
+        availability_element.get_text(
+            " ",
+            strip=True
+        )
+        if availability_element
+        else None
+    )
+
+    # Rating
+    rating_element = product.select_one(
+        "p.star-rating"
+    )
+
+    rating_text = None
+
+    if rating_element:
+
+        classes = rating_element.get(
+            "class",
+            []
+        )
+
+        if len(classes) > 1:
+            rating_text = classes[-1]
+
+    # Description
+    description = None
+
+    description_section = soup.select_one(
+        "#product_description"
+    )
+
+    if description_section:
+
+        description_element = (
+            description_section.find_next_sibling(
+                "p"
+            )
+        )
+
+        if description_element:
+
+            description = (
+                description_element.get_text(
+                    " ",
+                    strip=True
+                )
+            )
+
+    # Provenance
+    fetched_at = datetime.now(
+        timezone.utc
+    ).isoformat()
+
+    return {
+        "title": title,
+        "product_url": product_url,
+        "price_text": price_text,
+        "availability_text": availability_text,
+        "rating_text": rating_text,
+        "description": description,
+        "source_page": source_page,
+        "fetched_at": fetched_at
+    }
+
+
+def main():
+
+    # ==========================================
+    # Stage 2
+    # Discover the 60 books
+    # ==========================================
+
+    books = discover_books()
 
     print()
     print(
-        f"catalogue_pages={catalogue_pages}"
+        f"discovered={len(books)}"
     )
+
     print(
-        f"discovered={len(all_book_urls)}"
+        f"unique_urls={len(books)}"
     )
+
+    # ==========================================
+    # Stage 3
+    # Extract every book
+    # ==========================================
+
+    records = []
+
+    for index, book in enumerate(
+        books,
+        start=1
+    ):
+
+        product_url = book[
+            "product_url"
+        ]
+
+        source_page = book[
+            "source_page"
+        ]
+
+        print()
+        print(
+            f"[{index}/60] Processing book"
+        )
+
+        detail_cache = (
+            CACHE_DIR
+            / f"book-{index}.html"
+        )
+
+        try:
+
+            html = fetch_page(
+                product_url,
+                detail_cache
+            )
+
+            record = extract_book_record(
+                html,
+                product_url,
+                source_page
+            )
+
+            records.append(
+                record
+            )
+
+        except Exception as error:
+
+            print(
+                f"FAILED: {product_url}"
+            )
+
+            print(
+                f"REASON: {error}"
+            )
+
+    # ==========================================
+    # Stage 3 summary
+    # ==========================================
+
+    print()
+    print("=" * 50)
+
     print(
-        f"unique_urls={len(unique_book_urls)}"
+        f"detail_pages={len(records)}"
     )
+
+    print(
+        f"raw_records={len(records)}"
+    )
+
+    print("=" * 50)
+
+    # Print one complete raw record
+    if records:
+
+        print()
+        print("SAMPLE RAW RECORD")
+        print("-" * 50)
+
+        for key, value in records[0].items():
+
+            print(
+                f"{key}: {value}"
+            )
 
 
 if __name__ == "__main__":
