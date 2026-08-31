@@ -1,15 +1,20 @@
 import requests
 import time
+import json
 from pathlib import Path
 from urllib.parse import urljoin
 from datetime import datetime, timezone
 
 from bs4 import BeautifulSoup
 
+from normalize import normalize_record
+from schema import Book
+
 
 BASE_URL = "https://books.toscrape.com/"
 
 CACHE_DIR = Path("cache")
+OUTPUT_DIR = Path("output")
 
 HEADERS = {
     "User-Agent": (
@@ -216,7 +221,10 @@ def extract_book_record(
             "Product area not found"
         )
 
+    # -------------------------
     # Title
+    # -------------------------
+
     title_element = product.select_one(
         "h1"
     )
@@ -229,7 +237,10 @@ def extract_book_record(
         else None
     )
 
+    # -------------------------
     # Price
+    # -------------------------
+
     price_element = product.select_one(
         "p.price_color"
     )
@@ -242,7 +253,10 @@ def extract_book_record(
         else None
     )
 
+    # -------------------------
     # Availability
+    # -------------------------
+
     availability_element = product.select_one(
         "p.instock.availability"
     )
@@ -256,7 +270,10 @@ def extract_book_record(
         else None
     )
 
+    # -------------------------
     # Rating
+    # -------------------------
+
     rating_element = product.select_one(
         "p.star-rating"
     )
@@ -273,7 +290,10 @@ def extract_book_record(
         if len(classes) > 1:
             rating_text = classes[-1]
 
+    # -------------------------
     # Description
+    # -------------------------
+
     description = None
 
     description_section = soup.select_one(
@@ -297,7 +317,10 @@ def extract_book_record(
                 )
             )
 
+    # -------------------------
     # Provenance
+    # -------------------------
+
     fetched_at = datetime.now(
         timezone.utc
     ).isoformat()
@@ -334,7 +357,7 @@ def main():
 
     # ==========================================
     # Stage 3
-    # Extract every book
+    # Extract all book records
     # ==========================================
 
     records = []
@@ -354,7 +377,7 @@ def main():
 
         print()
         print(
-            f"[{index}/60] Processing book"
+            f"[{index}/{len(books)}] Processing book"
         )
 
         detail_cache = (
@@ -406,14 +429,135 @@ def main():
 
     print("=" * 50)
 
-    # Print one complete raw record
-    if records:
+    # ==========================================
+    # Stage 4
+    # Normalize + Validate
+    # ==========================================
+
+    valid_records = []
+
+    invalid_records = []
+
+    for record in records:
+
+        try:
+
+            # Normalize raw data
+            normalized_record = normalize_record(
+                record
+            )
+
+            # Validate using Pydantic
+            validated_book = Book(
+                **normalized_record
+            )
+
+            # Convert Pydantic model to dictionary
+            valid_records.append(
+                validated_book.model_dump(
+                    mode="json"
+                )
+            )
+
+        except Exception as error:
+
+            invalid_records.append(
+                {
+                    "record": record,
+                    "reason": str(error)
+                }
+            )
+
+    # ==========================================
+    # Stage 4 validation summary
+    # ==========================================
+
+    print()
+    print("=" * 50)
+    print("STAGE 4 VALIDATION")
+    print("=" * 50)
+
+    print(
+        f"valid_records={len(valid_records)}"
+    )
+
+    print(
+        f"invalid_records={len(invalid_records)}"
+    )
+
+    # ==========================================
+    # Save output
+    # ==========================================
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    books_file = (
+        OUTPUT_DIR / "books.json"
+    )
+
+    errors_file = (
+        OUTPUT_DIR / "errors.json"
+    )
+
+    # Save valid records
+    with books_file.open(
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        json.dump(
+            valid_records,
+            file,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    # Save invalid records
+    with errors_file.open(
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        json.dump(
+            invalid_records,
+            file,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    # ==========================================
+    # Output summary
+    # ==========================================
+
+    print()
+    print("OUTPUT")
+    print("-" * 50)
+
+    print(
+        f"books.json: {len(valid_records)} records"
+    )
+
+    print(
+        f"errors.json: {len(invalid_records)} records"
+    )
+
+    # ==========================================
+    # Show one validated record
+    # ==========================================
+
+    if valid_records:
 
         print()
-        print("SAMPLE RAW RECORD")
+        print(
+            "NORMALIZED + VALIDATED RECORD"
+        )
+
         print("-" * 50)
 
-        for key, value in records[0].items():
+        for key, value in valid_records[0].items():
 
             print(
                 f"{key}: {value}"
